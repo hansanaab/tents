@@ -3,7 +3,8 @@
 
 Left click:  empty -> tent -> grass -> empty
 Right click: toggle grass (drag to paint grass)
-N = new game, R = reset, 1/2/3 = easy/medium/hard, T = toggle always-on-top
+N = new game, R = reset, Esc = end game (back to menu),
+1-4 = easy/medium/hard/kushal, T = toggle always-on-top
 """
 import random
 import time
@@ -28,7 +29,7 @@ COLORS = {
     "win": "#2f7d32",
 }
 
-DIFFICULTIES = ("Easy", "Medium", "Hard")
+DIFFICULTIES = ("Easy", "Medium", "Hard", "Kushal")
 SIZES = (5, 6, 7, 8)
 
 
@@ -118,7 +119,7 @@ def count_solutions(n, trees, rows, cols, limit=2):
 
 
 def generate(n, difficulty):
-    density = {"Easy": 0.17, "Medium": 0.19, "Hard": 0.22}[difficulty]
+    density = {"Easy": 0.17, "Medium": 0.19, "Hard": 0.22, "Kushal": 0.22}[difficulty]
     target = max(3, round(n * n * density))
     for _ in range(2000):
         cells = [(r, c) for r in range(n) for c in range(n)]
@@ -138,9 +139,29 @@ def generate(n, difficulty):
             continue
         rows = [sum(1 for t in tents if t[0] == r) for r in range(n)]
         cols = [sum(1 for t in tents if t[1] == c) for c in range(n)]
-        if count_solutions(n, trees, rows, cols) == 1:
-            return trees, set(tents), rows, cols
+        if count_solutions(n, trees, rows, cols) != 1:
+            continue
+        if difficulty == "Kushal":
+            rows = kushal_rows(n, trees, rows, cols)
+            if rows is None:
+                continue
+        return trees, set(tents), rows, cols
     raise RuntimeError("could not generate puzzle")
+
+
+def kushal_rows(n, trees, rows, cols):
+    """Shift one tent between two neighbouring row clues for the Kushal level."""
+    for _ in range(200):
+        a = random.randrange(n)
+        b = a + random.choice((-1, 1))
+        if not 0 <= b < n or rows[a] == 0 or rows[b] >= (n + 1) // 2:
+            continue
+        new = rows[:]
+        new[a] -= 1
+        new[b] += 1
+        if count_solutions(n, trees, new, cols, limit=1) == 0:
+            return new
+    return None
 
 
 class Tents:
@@ -150,6 +171,9 @@ class Tents:
         self.difficulty = tk.StringVar(value="Medium")
         self.size_var = tk.IntVar(value=6)
         self.topmost = tk.BooleanVar(value=True)
+        self.screen = "menu"
+        self.won = False
+        self.buttons = []
         root.title("Tents")
         root.resizable(False, False)
         root.configure(bg=COLORS["bg"])
@@ -166,11 +190,12 @@ class Tents:
         self.build_menu()
         root.bind("n", lambda e: self.new_game())
         root.bind("r", lambda e: self.reset())
+        root.bind("<Escape>", lambda e: self.show_menu())
         root.bind("t", lambda e: self.topmost.set(not self.topmost.get()) or self.apply_topmost())
         for i, d in enumerate(DIFFICULTIES, 1):
             root.bind(str(i), lambda e, d=d: (self.difficulty.set(d), self.new_game()))
 
-        self.new_game(first=True)
+        self.show_menu(first=True)
         self.tick()
 
     def build_menu(self):
@@ -178,6 +203,7 @@ class Tents:
         game = tk.Menu(m, tearoff=0)
         game.add_command(label="New Game", accelerator="N", command=self.new_game)
         game.add_command(label="Reset", accelerator="R", command=self.reset)
+        game.add_command(label="End Game", accelerator="Esc", command=self.show_menu)
         game.add_separator()
         game.add_checkbutton(label="Always on Top", accelerator="T",
                              variable=self.topmost, command=self.apply_topmost)
@@ -197,14 +223,38 @@ class Tents:
     def apply_topmost(self):
         self.root.attributes("-topmost", self.topmost.get())
 
-    # ---------- game state ----------
-    def new_game(self, first=False):
+    def fit_window(self, first=False):
         self.n = self.size_var.get()
+        w = self.n * CELL + CLUE + PAD * 2
+        self.canvas.config(width=w, height=w)
+        self.root.update_idletasks()
+        if first:
+            x = self.root.winfo_screenwidth() - w - 20
+            self.root.geometry(f"+{x}+40")
+
+    # ---------- screens ----------
+    def show_menu(self, first=False):
+        self.screen = "menu"
+        self.won = False
+        self.fit_window(first)
+        self.draw()
+
+    def pick_size(self, s):
+        self.size_var.set(s)
+        self.show_menu()
+
+    def pick_level(self, d):
+        self.difficulty.set(d)
+        self.new_game()
+
+    def new_game(self):
+        self.screen = "game"
+        self.fit_window()
+        n = self.n
         d = self.difficulty.get()
-        self.trees, self.solution, self.rows, self.cols = generate(self.n, d)
+        self.trees, self.solution, self.rows, self.cols = generate(n, d)
         self.state = {}      # (r,c) -> "tent" | "grass"
         self.locked = set()
-        n = self.n
         if d in ("Easy", "Medium"):
             near = {p for t in self.trees for p in orth(*t, n)}
             for r in range(n):
@@ -220,20 +270,17 @@ class Tents:
         self.initial = dict(self.state)
         self.start = time.time()
         self.won = False
-        w = n * CELL + CLUE + PAD * 2
-        self.canvas.config(width=w, height=w)
-        self.root.update_idletasks()
-        if first:
-            x = self.root.winfo_screenwidth() - w - 20
-            self.root.geometry(f"+{x}+40")
         self.draw()
 
     def reset(self):
+        if self.screen != "game":
+            return
         self.state = dict(self.initial)
         self.won = False
         self.start = time.time()
         self.draw()
 
+    # ---------- input ----------
     def cell_at(self, e):
         c = (e.x - PAD) // CELL
         r = (e.y - PAD) // CELL
@@ -242,15 +289,14 @@ class Tents:
         return None
 
     def editable(self, p):
-        return p and not self.won and p not in self.trees and p not in self.locked
+        return (p and self.screen == "game" and not self.won
+                and p not in self.trees and p not in self.locked)
 
     def on_left(self, e):
-        if self.won:
-            for (x0, y0, x1, y1), d in self.buttons:
-                if x0 <= e.x <= x1 and y0 <= e.y <= y1:
-                    self.difficulty.set(d)
-                    self.new_game()
-            return
+        for (x0, y0, x1, y1), action in self.buttons:
+            if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                action()
+                return
         p = self.cell_at(e)
         if not self.editable(p):
             return
@@ -300,15 +346,52 @@ class Tents:
                         self.state[(r, c)] = "grass"
 
     def tick(self):
-        secs = self.elapsed if self.won else int(time.time() - self.start)
-        label = "Solved! " if self.won else ""
-        self.root.title(f"Tents {label}{secs // 60}:{secs % 60:02d}")
+        if self.screen == "menu":
+            self.root.title("Tents")
+        else:
+            secs = self.elapsed if self.won else int(time.time() - self.start)
+            label = "Solved! " if self.won else ""
+            self.root.title(f"Tents {label}{secs // 60}:{secs % 60:02d}")
         self.root.after(500, self.tick)
 
     # ---------- drawing ----------
+    def button(self, box, text, action, primary=False, font=("Helvetica", 11, "bold")):
+        x0, y0, x1, y1 = box
+        self.canvas.create_rectangle(*box, fill=COLORS["win"] if primary else COLORS["grass"],
+                                     outline=COLORS["win"])
+        self.canvas.create_text((x0 + x1) / 2, (y0 + y1) / 2, text=text, font=font,
+                                fill="white" if primary else COLORS["clue"])
+        self.buttons.append((box, action))
+
     def draw(self):
+        self.canvas.delete("all")
+        self.buttons = []
+        if self.screen == "menu":
+            self.draw_menu()
+        else:
+            self.draw_game()
+
+    def draw_menu(self):
+        cv = self.canvas
+        w = self.n * CELL + CLUE + PAD * 2
+        top = (w - 188) / 2
+        cv.create_text(w / 2, top + 16, text="Tents", font=("Helvetica", 20, "bold"),
+                       fill=COLORS["win"])
+        gap = 4
+        sw = (w - 16 - gap * (len(SIZES) - 1)) / len(SIZES)
+        x = 8
+        for s in SIZES:
+            self.button((x, top + 36, x + sw, top + 58), f"{s}×{s}",
+                        lambda s=s: self.pick_size(s), primary=s == self.n,
+                        font=("Helvetica", 10, "bold"))
+            x += sw + gap
+        y = top + 68
+        for d in DIFFICULTIES:
+            self.button((16, y, w - 16, y + 24), d, lambda d=d: self.pick_level(d))
+            y += 29
+
+    def draw_game(self):
         cv, n = self.canvas, self.n
-        cv.delete("all")
         tents = self.tents()
         bad = {a for a in tents for b in tents if a != b and touching(a, b)}
         for r in range(n):
@@ -340,39 +423,33 @@ class Tents:
             have = sum(1 for p in tents if p[1] == c)
             cv.create_text(PAD + c * CELL + CELL / 2, PAD + n * CELL + CLUE / 2,
                            text=str(self.cols[c]), font=font, fill=self.clue_color(have, self.cols[c]))
+        corner = PAD + n * CELL
         if self.won:
-            cv.create_text(PAD + n * CELL + CLUE / 2, PAD + n * CELL + CLUE / 2,
+            cv.create_text(corner + CLUE / 2, corner + CLUE / 2,
                            text="✓", font=font, fill=COLORS["win"])
             self.draw_win_panel()
+        else:
+            # End game: back to the menu
+            self.button((corner + 2, corner + 2, corner + CLUE - 2, corner + CLUE - 2), "✕",
+                        self.show_menu, font=("Helvetica", 11, "bold"))
 
     def draw_win_panel(self):
-        """Overlay with 'Solved' and one New Game button per difficulty."""
+        """Overlay with 'Solved', Play Again and Menu buttons."""
         cv = self.canvas
         size = self.n * CELL
         mid = PAD + size / 2
-        gap, bh = 5, 26
-        bw = min(54, (size - 28 - 2 * gap) / 3)
-        bfont = ("Helvetica", 11 if bw >= 54 else 10, "bold")
-        top = mid - 44
-        cv.create_rectangle(PAD + 8, top, PAD + size - 8, mid + 50,
+        top = mid - 34
+        cv.create_rectangle(PAD + 8, top, PAD + size - 8, mid + 34,
                             fill="white", outline=COLORS["win"], width=2)
         secs = self.elapsed
-        cv.create_text(mid, top + 16, text=f"Solved in {secs // 60}:{secs % 60:02d}",
+        cv.create_text(mid, top + 18, text=f"Solved in {secs // 60}:{secs % 60:02d}",
                        font=("Helvetica", 13, "bold"), fill=COLORS["win"])
-        cv.create_text(mid, top + 38, text="New game:", font=("Helvetica", 11),
-                       fill=COLORS["clue"])
-        self.buttons = []
-        x = mid - (3 * bw + 2 * gap) / 2
-        y = top + 54
-        for d in DIFFICULTIES:
-            box = (x, y, x + bw, y + bh)
-            current = d == self.difficulty.get()
-            cv.create_rectangle(*box, fill=COLORS["win"] if current else COLORS["grass"],
-                                outline=COLORS["win"])
-            cv.create_text(x + bw / 2, y + bh / 2, text=d, font=bfont,
-                           fill="white" if current else COLORS["clue"])
-            self.buttons.append((box, d))
-            x += bw + gap
+        gap = 6
+        bw = min(70, (size - 32 - gap) / 2)
+        y = top + 34
+        self.button((mid - gap / 2 - bw, y, mid - gap / 2, y + 26), "Again",
+                    self.new_game, primary=True)
+        self.button((mid + gap / 2, y, mid + gap / 2 + bw, y + 26), "Menu", self.show_menu)
 
     def clue_color(self, have, want):
         if self.won:
